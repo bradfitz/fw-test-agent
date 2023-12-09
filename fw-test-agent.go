@@ -32,6 +32,7 @@ var flagJSON = flag.Bool("json", false, "output JSON instead of text")
 func main() {
 	flag.Parse()
 	var sawErr bool
+	ctx := context.Background()
 	errf := func(format string, args ...any) {
 		sawErr = true
 		log.SetFlags(0)
@@ -56,10 +57,10 @@ func main() {
 	for _, cmd := range flag.Args() {
 		switch {
 		case cmd == "v6":
-			addr, err := getPublicIPv6()
+			addr, err := getPublicIPv6(ctx)
 			out(cmd, addr, err)
 		case cmd == "v4":
-			addr, err := getPublicIPv4()
+			addr, err := getPublicIPv4(ctx)
 			out(cmd, addr, err)
 		case cmd == "dns" || strings.HasPrefix(cmd, "dns:"):
 			// dns
@@ -69,7 +70,7 @@ func main() {
 				host = "google.com"
 				cmd = "dns:google.com"
 			}
-			res, err := checkDNS(host)
+			res, err := checkDNS(ctx, host)
 			out(cmd, res, err)
 		default:
 			errf("unknown command: %s", cmd)
@@ -88,16 +89,16 @@ func (r *AddrResult) String() string {
 	return r.Addr.String()
 }
 
-func getPublicIPv6() (*AddrResult, error) {
-	return canHazIP(true)
+func getPublicIPv6(ctx context.Context) (*AddrResult, error) {
+	return canHazIP(ctx, true)
 }
 
-func getPublicIPv4() (*AddrResult, error) {
-	return canHazIP(false)
+func getPublicIPv4(ctx context.Context) (*AddrResult, error) {
+	return canHazIP(ctx, false)
 }
 
-func canHazIP(v6 bool) (*AddrResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func canHazIP(ctx context.Context, v6 bool) (*AddrResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	googDNS := "8.8.8.8"
@@ -162,8 +163,8 @@ func (r *DNSResult) String() string {
 	return sb.String()
 }
 
-func checkDNS(host string) (*DNSResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func checkDNS(ctx context.Context, host string) (*DNSResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var res net.Resolver
