@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/bradfitz/fw-test-agent/systemdsvc"
 	"tailscale.com/client/tailscale"
 )
 
@@ -35,10 +36,15 @@ var (
 	flagJSON      = flag.Bool("json", false, "output JSON instead of text")
 	flagListen    = flag.String("listen", "", "listen address for HTTP server (e.g. \":8080\")")
 	flagTailscale = flag.Bool("require-tailscale", false, "only serve connections from Tailscale")
+	flagSystemd   = flag.String("systemd", "", "systemd action to perform. supported: install, uninstall")
 )
 
 func main() {
 	flag.Parse()
+	if *flagSystemd != "" {
+		systemdsvc.HandleAction(*flagSystemd, "fw-test-agent.service", flag.Args()...)
+		return
+	}
 
 	if *flagListen != "" {
 		if flag.NArg() > 0 {
