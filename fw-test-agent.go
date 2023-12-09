@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -71,6 +73,14 @@ func main() {
 				cmd = "dns:google.com"
 			}
 			res, err := checkDNS(ctx, host)
+			out(cmd, res, err)
+		case strings.HasPrefix(cmd, "ping:"):
+			_, host, _ := strings.Cut(cmd, ":")
+			res, err := checkPing(ctx, host)
+			out(cmd, res, err)
+		case strings.HasPrefix(cmd, "tcp:"):
+			_, hostport, _ := strings.Cut(cmd, ":")
+			res, err := checkTCP(ctx, hostport)
 			out(cmd, res, err)
 		default:
 			errf("unknown command: %s", cmd)
@@ -185,4 +195,64 @@ func checkDNS(ctx context.Context, host string) (*DNSResult, error) {
 		ret.Addrs = append(ret.Addrs, ip)
 	}
 	return ret, nil
+}
+
+type PingResult struct {
+	Success bool
+}
+
+func (r *PingResult) String() string {
+	if r.Success {
+		return "success"
+	}
+	return "failure"
+}
+
+func checkPing(ctx context.Context, host string) (*PingResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var timeoutFlag string
+	switch runtime.GOOS {
+	case "linux":
+		timeoutFlag = "-W"
+	case "darwin":
+		timeoutFlag = "-t"
+	default:
+		return nil, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+
+	out, err := exec.CommandContext(ctx, "ping",
+		"-c", "1",
+		timeoutFlag, "4",
+		host,
+	).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ping failure: %v: %s", err, out)
+	}
+	return &PingResult{Success: true}, nil
+}
+
+type TCPResult struct {
+	Success bool
+}
+
+func (r *TCPResult) String() string {
+	if r.Success {
+		return "success"
+	}
+	return "failure"
+}
+
+func checkTCP(ctx context.Context, hostport string) (*TCPResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "tcp", hostport)
+	if err != nil {
+		return nil, err
+	}
+	c.Close()
+	return &TCPResult{Success: true}, nil
 }
