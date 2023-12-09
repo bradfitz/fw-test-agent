@@ -114,6 +114,7 @@ func canHazIP(ctx context.Context, v6 bool) (*AddrResult, error) {
 	}
 	c := &http.Client{
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 				if !strings.ContainsFunc(network, unicode.IsDigit) {
 					if v6 {
