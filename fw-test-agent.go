@@ -23,16 +23,33 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"tailscale.com/client/tailscale"
 )
 
 type Result interface {
 	String() string
 }
 
-var flagJSON = flag.Bool("json", false, "output JSON instead of text")
+var (
+	flagJSON      = flag.Bool("json", false, "output JSON instead of text")
+	flagListen    = flag.String("listen", "", "listen address for HTTP server (e.g. \":8080\")")
+	flagTailscale = flag.Bool("require-tailscale", false, "only serve connections from Tailscale")
+)
 
 func main() {
 	flag.Parse()
+
+	if *flagListen != "" {
+		if flag.NArg() > 0 {
+			log.Fatal("cannot specify both --listen and commands")
+		}
+		log.Fatal(http.ListenAndServe(*flagListen, http.HandlerFunc(serve)))
+	}
+	if *flagListen == "" && flag.NArg() == 0 {
+		log.Fatal("must specify either --listen or commands")
+	}
+
 	var sawErr bool
 	ctx := context.Background()
 	errf := func(format string, args ...any) {
@@ -40,7 +57,7 @@ func main() {
 		log.SetFlags(0)
 		log.Printf(format, args...)
 	}
-	out := func(cmd string, res Result, err error) {
+	onResult := func(cmd string, res Result, err error) {
 		if err != nil {
 			errf("%s: %v", cmd, err)
 			return
@@ -57,37 +74,75 @@ func main() {
 	}
 
 	for _, cmd := range flag.Args() {
-		switch {
-		case cmd == "v6":
-			addr, err := getPublicIPv6(ctx)
-			out(cmd, addr, err)
-		case cmd == "v4":
-			addr, err := getPublicIPv4(ctx)
-			out(cmd, addr, err)
-		case cmd == "dns" || strings.HasPrefix(cmd, "dns:"):
-			// dns
-			// dns:google.com
-			_, host, _ := strings.Cut(cmd, ":")
-			if host == "" {
-				host = "google.com"
-				cmd = "dns:google.com"
-			}
-			res, err := checkDNS(ctx, host)
-			out(cmd, res, err)
-		case strings.HasPrefix(cmd, "ping:"):
-			_, host, _ := strings.Cut(cmd, ":")
-			res, err := checkPing(ctx, host)
-			out(cmd, res, err)
-		case strings.HasPrefix(cmd, "tcp:"):
-			_, hostport, _ := strings.Cut(cmd, ":")
-			res, err := checkTCP(ctx, hostport)
-			out(cmd, res, err)
-		default:
-			errf("unknown command: %s", cmd)
-		}
+		runCmd(ctx, cmd, onResult)
 	}
 	if sawErr {
 		os.Exit(1)
+	}
+}
+
+func runCmd(ctx context.Context, cmd string, onResult func(cmd string, res Result, err error)) {
+	switch {
+	case cmd == "v6":
+		addr, err := getPublicIPv6(ctx)
+		onResult(cmd, addr, err)
+	case cmd == "v4":
+		addr, err := getPublicIPv4(ctx)
+		onResult(cmd, addr, err)
+	case cmd == "dns" || strings.HasPrefix(cmd, "dns:"):
+		// dns
+		// dns:google.com
+		_, host, _ := strings.Cut(cmd, ":")
+		if host == "" {
+			host = "google.com"
+			cmd = "dns:google.com"
+		}
+		res, err := checkDNS(ctx, host)
+		onResult(cmd, res, err)
+	case strings.HasPrefix(cmd, "ping:"):
+		_, host, _ := strings.Cut(cmd, ":")
+		res, err := checkPing(ctx, host)
+		onResult(cmd, res, err)
+	case strings.HasPrefix(cmd, "tcp:"):
+		_, hostport, _ := strings.Cut(cmd, ":")
+		res, err := checkTCP(ctx, hostport)
+		onResult(cmd, res, err)
+	default:
+		onResult(cmd, nil, fmt.Errorf("unknown command %q", cmd))
+	}
+}
+
+func serve(w http.ResponseWriter, r *http.Request) {
+	if *flagTailscale {
+		who, err := tailscale.WhoIs(r.Context(), r.RemoteAddr)
+		if err != nil {
+			log.Printf("non-Tailscale access from %v: %v", r.RemoteAddr, err)
+			http.Error(w, "only access over Tailscale permitted", http.StatusForbidden)
+			return
+		}
+		log.Printf("got query from %v (%v)", r.RemoteAddr, who.UserProfile.DisplayName)
+	}
+	cmd := r.RequestURI[1:]
+	if cmd == "" {
+		io.WriteString(w, "fw-test-agent\n")
+		return
+	}
+	type resT struct {
+		Cmd    string
+		Result any    `json:",omitempty"`
+		Error  string `json:",omitempty"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+	for _, cmd := range strings.Split(cmd, ",") {
+		runCmd(r.Context(), cmd, func(cmd string, res Result, err error) {
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "\t")
+			if err != nil {
+				enc.Encode(resT{Cmd: cmd, Error: err.Error()})
+			} else {
+				enc.Encode(resT{Cmd: cmd, Result: res})
+			}
+		})
 	}
 }
 
