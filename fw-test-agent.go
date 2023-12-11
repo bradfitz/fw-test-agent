@@ -20,12 +20,14 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/bradfitz/fw-test-agent/systemdsvc"
 	"tailscale.com/client/tailscale"
+	"tailscale.com/net/stun"
 )
 
 type Result interface {
@@ -34,7 +36,7 @@ type Result interface {
 
 var (
 	flagJSON      = flag.Bool("json", false, "output JSON instead of text")
-	flagListen    = flag.String("listen", "", "listen address for HTTP server (e.g. \":8080\")")
+	flagListen    = flag.String("listen", "", "listen address for HTTP server (e.g. \":8042\")")
 	flagTailscale = flag.Bool("require-tailscale", false, "only serve connections from Tailscale")
 	flagSystemd   = flag.String("systemd", "", "systemd action to perform. supported: install, uninstall")
 )
@@ -95,6 +97,19 @@ func runCmd(ctx context.Context, cmd string, onResult func(cmd string, res Resul
 	case cmd == "v4":
 		addr, err := getPublicIPv4(ctx)
 		onResult(cmd, addr, err)
+	case cmd == "v4stun" || strings.HasPrefix(cmd, "v4stun:"):
+		_, portStr, _ := strings.Cut(cmd, ":")
+		var reqPort uint64
+		if portStr != "" {
+			var err error
+			reqPort, err = strconv.ParseUint(portStr, 10, 16)
+			if err != nil {
+				onResult(cmd, nil, err)
+				return
+			}
+		}
+		ap, err := getPublicIPv4STUN(ctx, uint16(reqPort))
+		onResult(cmd, ap, err)
 	case cmd == "dns" || strings.HasPrefix(cmd, "dns:"):
 		// dns
 		// dns:google.com
@@ -316,4 +331,67 @@ func checkTCP(ctx context.Context, hostport string) (*TCPResult, error) {
 	}
 	c.Close()
 	return &TCPResult{Success: true}, nil
+}
+
+type AddrPortResult struct {
+	AddrPort           netip.AddrPort
+	RequestedLocalPort uint16
+	LocalPort          uint16
+}
+
+func (r *AddrPortResult) String() string {
+	return fmt.Sprintf("local-port=%v stun-saw=%v", r.LocalPort, r.AddrPort)
+}
+
+func getPublicIPv4STUN(ctx context.Context, reqLocalPort uint16) (*AddrPortResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	uaddr, err := net.ResolveUDPAddr("udp4", "derp1.tailscale.com:3478")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var laddr *net.UDPAddr
+	if reqLocalPort != 0 {
+		laddr = &net.UDPAddr{
+			Port: int(reqLocalPort),
+		}
+	}
+	c, err := net.ListenUDP("udp4", laddr)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	localPort := c.LocalAddr().(*net.UDPAddr).Port
+	ret := &AddrPortResult{
+		LocalPort:          uint16(localPort),
+		RequestedLocalPort: reqLocalPort,
+	}
+
+	txID := stun.NewTxID()
+	req := stun.Request(txID)
+
+	_, err = c.WriteToUDP(req, uaddr)
+	if err != nil {
+		return nil, fmt.Errorf("WriteToUDP: %w", err)
+	}
+
+	var buf [1024]byte
+	n, _, err := c.ReadFromUDPAddrPort(buf[:])
+	if err != nil {
+		return nil, err
+	}
+
+	tid, saddr, err := stun.ParseResponse(buf[:n])
+	if err != nil {
+		log.Fatal(err)
+	}
+	if tid != txID {
+		return nil, fmt.Errorf("txid mismatch: got %v, want %v", tid, txID)
+	}
+
+	ret.AddrPort = saddr
+
+	return ret, nil
 }
