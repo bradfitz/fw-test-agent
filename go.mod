@@ -1,6 +1,6 @@
 module github.com/bradfitz/fw-test-agent
 
-go 1.21.4
+go 1.21
 
 require tailscale.com v1.54.1
 
